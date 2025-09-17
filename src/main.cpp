@@ -1,153 +1,83 @@
-#include <Arduino.h>
-/*
- * Basic MIDI Visualizer
- * by David Madison © 2017
- * www.partsnotincluded.com
- * 
- * This is a basic MIDI visualizer using addressable LEDs, to demonstrate how
- * Arduino's MIDI library works. Playing a note turns an LED on, stopping a note
- * turns the LED off. Continuous controllers 21, 22, and 23 adjust the RGB color.  
- * 
- */
-
 #include <FastLED.h>
-//#include <Adafruit_NeoPixel.h> // Uncomment if you're using RGBW LEDs
-
-// ---- User Settings --------------------------
-#define DATAPIN 6
-#define NUMLEDS 60
-#define BRIGHTNESS 255
-#define BAUDRATE 115200 // For Hairless
-#define NOTESTART 40
-// ----------------------------------------
-
-// Continuous Controller Numbers
-static const uint8_t
-  redCC   = 21,
-  greenCC = 22,
-  blueCC  = 23;
-
-// Settings
-static const uint8_t
-  Pin = DATAPIN,
-  NumLEDs = NUMLEDS,
-  minNote = NOTESTART,
-  maxNote = minNote + NumLEDs,
-  maxBright = BRIGHTNESS;
-
-// LED Color Values
-uint8_t
-  rVal = 255,
-  gVal = 255,
-  bVal = 255;
-
-// Build the LED strip
-#ifdef ADAFRUIT_NEOPIXEL_H
-  Adafruit_NeoPixel strip = Adafruit_NeoPixel(NumLEDs, Pin, NEO_GRBW + NEO_KHZ800);
-#elif FASTLED_VERSION
-  CRGB leds[NumLEDs];
-#endif
-
-boolean ledState[NumLEDs];
-
-// Create the MIDI Instance
 #include <MIDI.h>
-struct CustomBaud : public midi::DefaultSettings{
-    static const long BaudRate = BAUDRATE;
-};
-MIDI_CREATE_CUSTOM_INSTANCE(HardwareSerial, Serial, MIDI, CustomBaud);
 
-void setup(){
-  #ifdef ADAFRUIT_NEOPIXEL_H
-    strip.setBrightness(maxBright);
-    strip.begin();
-    strip.show();
-  #elif FASTLED_VERSION
-    FastLED.addLeds<WS2812B, Pin, GRB>(leds, NumLEDs);
-    FastLED.setBrightness(maxBright);
-    FastLED.show();  
-  #endif
-  
+// Forward declarations
+void handleNoteOff(byte ch, byte note, byte velocity);
+
+// ---------------- User config ----------------
+#define NUM_LEDS   144            // change to your strip length
+#define DATA_PIN   11
+#define CLOCK_PIN  13
+#define BRIGHTNESS 64            // be kind to eyes & PSU
+// Map: which real MIDI note is your LEFTMOST physical key?
+#define NOTE_START 36            // PSR-E373 low C is usually 36 (C2)
+// ---------------------------------------------
+
+CRGB leds[NUM_LEDS];
+
+// ---- MIDI @ 115200 for Hairless ----
+struct HairlessBaud : public midi::DefaultSettings {
+  static const long BaudRate = 115200;
+};
+MIDI_CREATE_CUSTOM_INSTANCE(HardwareSerial, Serial, MIDI, HairlessBaud);
+
+// --- simple LED state buffer so we can redraw colors if needed ---
+bool ledOn[NUM_LEDS] = {false};
+
+// Helpers
+inline bool noteInRange(byte note) {
+  return (note >= NOTE_START) && (note < (NOTE_START + NUM_LEDS));
+}
+inline uint16_t noteToIndex(byte note) {
+  // left-to-right strip: lowest note is index 0
+  return (uint16_t)(note - NOTE_START);
+  // If your strip enters from the RIGHT, flip it:
+  // return (uint16_t)((NOTE_START + NUM_LEDS - 1) - note);
+}
+
+void setKeyColor(uint16_t idx, uint8_t r, uint8_t g, uint8_t b) {
+  leds[idx].setRGB(r, g, b);
+}
+
+void lightOn(uint16_t idx, byte velocity) {
+  // velocity 1..127 → brightness scaling (coarse)
+  uint8_t v = constrain(map(velocity, 1, 127, 32, 255), 0, 255);
+  // pick a color; pure white scaled by velocity:
+  setKeyColor(idx, v, v, v);
+  ledOn[idx] = true;
+}
+
+void lightOff(uint16_t idx) {
+  setKeyColor(idx, 0, 0, 0);
+  ledOn[idx] = false;
+}
+
+void handleNoteOn(byte ch, byte note, byte velocity) {
+  if (velocity == 0) { 
+    handleNoteOff(ch, note, 64); 
+    return; 
+  } // running status
+  if (!noteInRange(note)) return;
+  lightOn(noteToIndex(note), velocity);
+  FastLED.show();
+}
+
+void handleNoteOff(byte ch, byte note, byte velocity) {
+  if (!noteInRange(note)) return;
+  lightOff(noteToIndex(note));
+  FastLED.show();
+}
+
+void setup() {
+  FastLED.addLeds<APA102, DATA_PIN, CLOCK_PIN, BGR>(leds, NUM_LEDS);
+  FastLED.setBrightness(BRIGHTNESS);
+  FastLED.clear(true);
+
   MIDI.setHandleNoteOn(handleNoteOn);
   MIDI.setHandleNoteOff(handleNoteOff);
-  MIDI.setHandleControlChange(handleControlChange);
   MIDI.begin(MIDI_CHANNEL_OMNI);
 }
 
-void loop(){
-  MIDI.read(); // Check for MIDI messages every loop
-}
-
-void handleNoteOn(byte channel, byte note, byte velocity){
-  // Check if note is in range
-  if(note < minNote || note > maxNote){
-    return;
-  }
-  
-  ledON(note - minNote);
-  show();
-}
-
-void handleNoteOff(byte channel, byte note, byte velocity){
-  // Check if note is in range
-  if(note < minNote || note > maxNote){
-    return;
-  }
-
-  ledOFF(note - minNote);
-  show();
-}
-
-void handleControlChange(byte channel, byte number, byte value){
-  switch(number){
-    case redCC:
-      rVal = map(value, 0, 127, 0, 255);
-      redraw();
-      break;
-    case greenCC:
-      gVal = map(value, 0, 127, 0, 255);
-      redraw();
-      break;
-    case blueCC:
-      bVal = map(value, 0, 127, 0, 255);
-      redraw();
-      break;
-  }
-}
-
-void ledON(uint8_t index){
-  ledState[index] = 1;
-  setLED(index, rVal, gVal, bVal);
-}
-
-void ledOFF(uint8_t index){
-  ledState[index] = 0;
-  setLED(index, 0, 0, 0);
-}
-
-void setLED(uint8_t index, uint8_t r, uint8_t g, uint8_t b){
-  #ifdef ADAFRUIT_NEOPIXEL_H
-    strip.setPixelColor(index, r, g, b);
-  #elif FASTLED_VERSION
-    leds[index].r = r;
-    leds[index].g = g;
-    leds[index].b = b;
-  #endif
-}
-
-void redraw(){
-  for(int i = 0; i<NumLEDs; i++){
-    if(ledState[i] == 1){
-      ledON(i);
-    }
-  }
-  show();
-}
-
-void show(){
-  #ifdef ADAFRUIT_NEOPIXEL_H
-    strip.show();
-  #elif FASTLED_VERSION
-    FastLED.show();
-  #endif
+void loop() {
+  MIDI.read(); // poll MIDI
 }
