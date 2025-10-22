@@ -15,28 +15,12 @@
 // ======== LED_LEFT_MARGIN / LED_RIGHT_MARGIN ========
 // Number of physical LEDs to leave unused (always off) at the *left* and *right*
 // ends of the strip. This is purely for alignment/centering on your piano.
-// Typical use: your strip is longer than the keybed; add margins to center it.
-//
-// How it works:
-//   LED_USABLE = NUM_LEDS - LED_LEFT_MARGIN - LED_RIGHT_MARGIN
-//   PIXELS_PER_KEY = LED_USABLE / KEY_COUNT   (floating point)
-// Keys are then mapped across the LED_USABLE region.
-//
-// Calibration tips:
-//   1) Start with both margins = 0. Verify NOTE_START (lowest key) lights near
-//      the physical left end of the strip.
-//   2) Increase LEFT/RIGHT margins to slide/center the mapped region over the keys.
-//      Example: With 144 LEDs and 61 keys, if you set LEFT=8 and RIGHT=7,
-//      you’ll use 144-8-7 = 129 LEDs → about 129/61 ≈ 2.11 LEDs per key.
-//   3) If margins are too large (LED_USABLE <= 0), nothing will light (guarded).
 #define LED_LEFT_MARGIN    0      // LEDs to skip on the left
-#define LED_RIGHT_MARGIN   25      // LEDs to skip on the right
+#define LED_RIGHT_MARGIN   25     // LEDs to skip on the right
 #define ORIENT_RIGHT_TO_LEFT 0    // set to 1 if your strip enters from the right
 
 // ======== BLACK-KEY COLORING ========
-// Define the 5 black-key pitch classes in one octave (relative to C=0):
-//   C#=1, D#=3, F#=6, G#=8, A#=10
-// We’ll check (note % 12) against this list to decide color.
+// C#=1, D#=3, F#=6, G#=8, A#=10
 const byte BLACK_PC[5] = { 1, 3, 6, 8, 10 };
 
 // White-key color (scaled by velocity later). Default = white.
@@ -45,7 +29,6 @@ const byte BLACK_PC[5] = { 1, 3, 6, 8, 10 };
 #define WHITE_B 255
 
 // Black-key color (scaled by velocity later). “Yellowish” by default.
-// Tune these three to taste (e.g., 255, 200, 0 is a warm yellow).
 #define BLACK_R 255
 #define BLACK_G 200
 #define BLACK_B 0
@@ -62,6 +45,9 @@ const uint16_t LED_START  = LED_LEFT_MARGIN;
 const uint16_t LED_END    = NUM_LEDS - 1 - LED_RIGHT_MARGIN;
 const uint16_t LED_USABLE = (LED_END >= LED_START) ? (LED_END - LED_START + 1) : 0;
 const float    PIXELS_PER_KEY = (KEY_COUNT > 0) ? (float)LED_USABLE / (float)KEY_COUNT : 0.0f;
+
+// Track on/off state to allow deterministic clears
+bool active[128] = { false };
 
 // Helpers
 inline bool noteInRange(byte note) {
@@ -106,19 +92,26 @@ void setKeySpanColor(uint16_t from, uint16_t to, uint8_t r, uint8_t g, uint8_t b
   for (uint16_t i = from; i <= to; i++) leds[i].setRGB(r, g, b);
 }
 
-void handleNoteOff(byte ch, byte note, byte velocity) {
+// Turn off the LEDs for a specific note (with bounds checks)
+void clearNote(byte note) {
   if (!noteInRange(note) || LED_USABLE == 0) return;
-
   uint16_t from, to;
   keySpan(note, from, to);
   setKeySpanColor(from, to, 0, 0, 0);
+}
 
+void handleNoteOff(byte ch, byte note, byte velocity) {
+  if (!noteInRange(note) || LED_USABLE == 0) return;
+  active[note] = false;
+  clearNote(note);
   FastLED.show();
 }
 
 void handleNoteOn(byte ch, byte note, byte velocity) {
   if (velocity == 0) { handleNoteOff(ch, note, 64); return; } // NoteOn w/ vel=0 = NoteOff
   if (!noteInRange(note) || LED_USABLE == 0) return;
+
+  active[note] = true;
 
   uint16_t from, to;
   keySpan(note, from, to);
@@ -144,6 +137,40 @@ void handleNoteOn(byte ch, byte note, byte velocity) {
   FastLED.show();
 }
 
+// Full clear: LEDs + note state
+void clearAllLedsAndState() {
+  FastLED.clear();
+  for (int i = 0; i < 128; ++i) active[i] = false;
+  FastLED.show();
+}
+
+// Respond to Control Change to support host “panic/reset”
+void handleCC(byte ch, byte controller, byte value) {
+  switch (controller) {
+    case 120: // All Sound Off
+    case 121: // Reset All Controllers
+      clearAllLedsAndState();
+      break;
+
+    case 123: { // All Notes Off
+      bool any = false;
+      for (byte n = 0; n < 128; ++n) {
+        if (active[n]) { clearNote(n); active[n] = false; any = true; }
+      }
+      if (any) FastLED.show();
+      break;
+    }
+
+    case 119: // Custom "Hard Reset" from host
+      clearAllLedsAndState();
+      break;
+
+    default:
+      // ignore other CCs
+      break;
+  }
+}
+
 void setup() {
   FastLED.addLeds<APA102, DATA_PIN, CLOCK_PIN, BGR>(leds, NUM_LEDS);
   FastLED.setBrightness(BRIGHTNESS);
@@ -151,6 +178,7 @@ void setup() {
 
   MIDI.setHandleNoteOn(handleNoteOn);
   MIDI.setHandleNoteOff(handleNoteOff);
+  MIDI.setHandleControlChange(handleCC);  // listen for panic/reset CCs
   MIDI.begin(MIDI_CHANNEL_OMNI);
 }
 
